@@ -1,3 +1,6 @@
 smolagents
 gradio
 arxiv
+requests
+python-dotenv
+PyPDF2
