@@ -4,3 +4,4 @@ arxiv
 requests
 python-dotenv
 PyPDF2
+google-search-results

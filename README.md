@@ -32,6 +32,7 @@ The application uses Hugging Face `smolagents`, the Qwen 2.5 Coder model, the ar
 - Generate BibTeX citations
 - Compare multiple papers using additional instructions
 - Guardrails for agent steps, input size, search results, PDF downloads, and PDF extraction
+- **Deep Research** tab combining arXiv papers with web search results (see below)
 
 ## Setup
 
@@ -67,7 +68,10 @@ Open `.env` and replace the placeholder with your own Hugging Face token:
 
 ```text
 HF_TOKEN=your_huggingface_token_here
+SERPAPI_API_KEY=your_serpapi_key_here
 ```
+
+`SERPAPI_API_KEY` is only required for the Deep Research tab. The arXiv Research tab works with `HF_TOKEN` alone.
 
 The real `.env` file is excluded from Git and should not be committed.
 
@@ -160,6 +164,42 @@ These include:
 
 These safeguards help prevent runaway agent execution, excessive resource usage, invalid downloads, and attempts to summarize PDFs from which no usable text could be extracted.
 
+## Deep Research Extension
+
+The interface has two tabs:
+
+- **arXiv Research — Original Lab**: the original lab workflow, preserved unchanged (search, Read Paper & Summarize, Summarize Methodology, BibTeX, PDF downloads, and all existing guardrails).
+- **Deep Research — Extended Multi-Source Research**: an extension that researches beyond a single academic source.
+
+Deep Research uses a **separate** `CodeAgent` with two tools:
+
+- `search_arxiv` — academic evidence from arXiv (1–3 papers)
+- `search_web` — complementary/current web evidence from Google via SerpAPI (1–5 results)
+
+The agent synthesizes both source types into a structured report (Overview, Academic Evidence, Web Evidence, Synthesis, Sources), keeps academic and web sources clearly separated, and only cites sources actually returned by the tools. It does not download or read PDFs.
+
+```text
+Research Question
+    ↓
+Deep Research CodeAgent
+    ↓            ↓
+search_arxiv   search_web (SerpAPI)
+    ↓            ↓
+   Multi-source synthesis report
+```
+
+**`SERPAPI_API_KEY` is required for Deep Research.** If it is missing, the tab shows a clear message and the arXiv tab keeps working.
+
+Additional Deep Research guardrails:
+
+- Maximum 5 agent steps
+- Maximum 3 arXiv papers and 5 web results (enforced in the tool and the app)
+- Research question limited to 300 characters; additional instructions to 1000 characters
+- Empty web queries rejected; web queries limited to 300 characters
+- Explicit handling of a missing API key, SerpAPI errors, and empty results
+- Request errors are not shown verbatim, so the API key can never leak into the UI
+- Prompt instructions forbid fabricated sources or unsupported claims
+
 ## Project Files
 
 ```text
@@ -211,6 +251,7 @@ The application requires:
 
 ```text
 HF_TOKEN
+SERPAPI_API_KEY   (Deep Research tab only)
 ```
 
 This token is used by the Hugging Face inference client.

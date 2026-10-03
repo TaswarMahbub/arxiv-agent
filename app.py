@@ -6,8 +6,10 @@ from smolagents import CodeAgent, InferenceClientModel
 
 from tools import (
     search_arxiv,
+    search_arxiv_research,
     download_arxiv_pdf,
     extract_pdf_text,
+    search_web,
     downloaded_files,
     searched_papers
 )
@@ -41,6 +43,23 @@ agent = CodeAgent(
         search_arxiv,
         download_arxiv_pdf,
         extract_pdf_text
+    ],
+    model=model,
+    add_base_tools=False,
+    max_steps=5
+)
+
+
+# ---------------------------------------------------------
+# Deep Research Agent (extension)
+# ---------------------------------------------------------
+# A separate agent with academic + web search only.
+# It does not download or read PDFs.
+
+deep_research_agent = CodeAgent(
+    tools=[
+        search_arxiv_research,
+        search_web
     ],
     model=model,
     add_base_tools=False,
@@ -238,6 +257,110 @@ def download_paper(paper_index):
 
 
 # ---------------------------------------------------------
+# Deep Research Function (extension)
+# ---------------------------------------------------------
+
+def deep_research(
+    question,
+    num_papers,
+    num_web_results,
+    depth,
+    additional_instructions
+):
+    # -----------------------------------------------------
+    # Input guardrails
+    # -----------------------------------------------------
+
+    # Validate user input before any agent task is built or run.
+    # (search_web keeps its own 300-character limit as defense-in-depth.)
+    question = (question or "").strip()
+    additional_instructions = (additional_instructions or "").strip()
+
+    if not question:
+        raise gr.Error("Please enter a research question.")
+
+    if len(question) > 300:
+        raise gr.Error("Research question must be 300 characters or fewer.")
+
+    if len(additional_instructions) > 1000:
+        raise gr.Error("Additional instructions must be 1000 characters or fewer.")
+
+    if not os.getenv("SERPAPI_API_KEY"):
+        return (
+            "Deep Research requires a SerpAPI key. Please add "
+            "`SERPAPI_API_KEY` to your `.env` file and restart the app."
+        )
+
+    # Hard limits, independent of the UI sliders
+    num_papers = max(1, min(int(num_papers), 3))
+    num_web_results = max(1, min(int(num_web_results), 5))
+
+    if depth == "Detailed":
+        depth_instructions = (
+            "Write a detailed report: discuss each source individually "
+            "and give a thorough synthesis."
+        )
+    else:
+        depth_instructions = (
+            "Write a concise report: keep each section short and focused."
+        )
+
+    formatted_prompt = f"""
+Research question: {question}
+
+Research instructions:
+- Call search_arxiv_research exactly once with max_results set exactly to {num_papers}.
+- Call search_web exactly once with max_results set exactly to {num_web_results}.
+- search_arxiv_research returns a list of dicts with keys exactly: 'title', 'authors', 'year', 'url', 'abstract'.
+- search_web returns a list of dicts with keys exactly: 'title', 'url', 'snippet'.
+- Use only these keys. Print the search results first, read them, then write the report.
+- Do not download or read PDFs. Use only the returned arXiv metadata/abstracts and web snippets.
+- Never claim a source says something that is not supported by its returned abstract or snippet.
+- Never invent sources, titles, authors, or URLs. Only cite sources returned by the tools.
+- If a search returns no results, or the evidence is insufficient to answer the question, say so explicitly.
+- Clearly distinguish academic (arXiv) evidence from web evidence.
+- {depth_instructions}
+"""
+
+    if additional_instructions.strip():
+        formatted_prompt += f"- Additional instructions: {additional_instructions}\n"
+
+    formatted_prompt += """
+Formatting instructions:
+- Answer in the same language as the research question unless asked otherwise.
+- Only call final_answer in a later step, after the search results have been printed and read.
+- The final answer must be a Markdown string that starts with the heading "# Deep Research Report"
+  followed by these "##" sections in this order. The text after each colon DESCRIBES the
+  required content; it is NOT text to copy and MUST NOT be reproduced literally:
+  - "## Overview": a synthesis that directly answers the research question.
+  - "## Academic Evidence": the findings from each returned arXiv paper, with its title, authors, and year.
+  - "## Web Evidence": the findings from each returned web result, with its page title.
+  - "## Synthesis": agreements, differences, or complementary information across the two source types, and any gaps in the evidence.
+  - "## Sources": a "### Academic Sources" numbered list (title and arXiv URL) and a "### Web Sources" numbered list (title and URL).
+- Do not repeat, quote, or reproduce the report template or placeholder instructions. Replace every section with substantive content derived from the retrieved sources.
+- Do not include Python representations such as lists or dictionaries in the final answer.
+- Do not include internal reasoning or execution details in the final answer.
+"""
+
+    try:
+        result = deep_research_agent.run(formatted_prompt)
+        result_text = str(result)
+        api_key = os.getenv("SERPAPI_API_KEY")
+        if api_key:
+            result_text = result_text.replace(api_key, "[REDACTED]")
+        return result_text
+
+    except Exception as e:
+        error_text = str(e)
+        api_key = os.getenv("SERPAPI_API_KEY")
+
+        # Never show the API key in the UI
+        if api_key:
+            error_text = error_text.replace(api_key, "[REDACTED]")
+
+        return f"### Deep Research Error\n\n```text\n{error_text}\n```"
+
+# ---------------------------------------------------------
 # Gradio Interface
 # ---------------------------------------------------------
 
@@ -249,145 +372,223 @@ with gr.Blocks(
         """
         # Autonomous arXiv Research Agent
 
-        Search, read, and analyze academic papers from arXiv.
+        Search, read, and analyze academic papers from arXiv,
+        or run multi-source Deep Research across arXiv and the web.
         """
     )
 
-    # -----------------------------------------------------
-    # Research topic
-    # -----------------------------------------------------
+    with gr.Tab("arXiv Research — Original Lab"):
 
-    topic = gr.Textbox(
-        label="Research Topic",
-        placeholder=(
-            "E.g., Agentic AI, Neural SDEs, Computer Vision"
-        )
-    )
-
-    # -----------------------------------------------------
-    # Number of papers
-    # -----------------------------------------------------
-
-    num_papers = gr.Slider(
-        minimum=1,
-        maximum=3,
-        value=1,
-        step=1,
-        label="Number of Papers"
-    )
-
-    # -----------------------------------------------------
-    # Research options
-    # -----------------------------------------------------
-
-    with gr.Row():
-
-        read_paper = gr.Checkbox(
-            label="Read Paper & Summarize",
-            value=False
+        gr.Markdown(
+            "Search, read, and analyze academic papers from arXiv."
         )
 
-        summarize_methodology = gr.Checkbox(
-            label="Summarize Methodology",
-            value=False
+        # -----------------------------------------------------
+        # Research topic
+        # -----------------------------------------------------
+
+        topic = gr.Textbox(
+            label="Research Topic",
+            placeholder=(
+                "E.g., Agentic AI, Neural SDEs, Computer Vision"
+            )
         )
 
-        generate_bibtex = gr.Checkbox(
-            label="Generate BibTeX",
-            value=False
+        # -----------------------------------------------------
+        # Number of papers
+        # -----------------------------------------------------
+
+        num_papers = gr.Slider(
+            minimum=1,
+            maximum=3,
+            value=1,
+            step=1,
+            label="Number of Papers"
         )
 
-    # -----------------------------------------------------
-    # Additional instructions
-    # -----------------------------------------------------
+        # -----------------------------------------------------
+        # Research options
+        # -----------------------------------------------------
 
-    additional_instructions = gr.Textbox(
-        label="Additional Instructions (Optional)",
-        placeholder=(
-            "E.g., Explain the main findings in simple language."
-        ),
-        lines=2
-    )
+        with gr.Row():
 
-    # -----------------------------------------------------
-    # Research button
-    # -----------------------------------------------------
+            read_paper = gr.Checkbox(
+                label="Read Paper & Summarize",
+                value=False
+            )
 
-    research_button = gr.Button(
-        "Research"
-    )
+            summarize_methodology = gr.Checkbox(
+                label="Summarize Methodology",
+                value=False
+            )
 
-    # -----------------------------------------------------
-    # Agent result
-    # -----------------------------------------------------
+            generate_bibtex = gr.Checkbox(
+                label="Generate BibTeX",
+                value=False
+            )
 
-    output = gr.Markdown(
-        label="Research Results"
-    )
+        # -----------------------------------------------------
+        # Additional instructions
+        # -----------------------------------------------------
 
-    # -----------------------------------------------------
-    # Download controls
-    # -----------------------------------------------------
-
-    gr.Markdown("### Download Papers")
-
-    with gr.Row():
-
-        download_1 = gr.DownloadButton(
-            "Download Paper 1",
-            visible=False
+        additional_instructions = gr.Textbox(
+            label="Additional Instructions (Optional)",
+            placeholder=(
+                "E.g., Explain the main findings in simple language."
+            ),
+            lines=2
         )
 
-        download_2 = gr.DownloadButton(
-            "Download Paper 2",
-            visible=False
+        # -----------------------------------------------------
+        # Research button
+        # -----------------------------------------------------
+
+        research_button = gr.Button(
+            "Research"
         )
 
-        download_3 = gr.DownloadButton(
-            "Download Paper 3",
-            visible=False
+        # -----------------------------------------------------
+        # Agent result
+        # -----------------------------------------------------
+
+        output = gr.Markdown(
+            label="Research Results"
         )
 
+        # -----------------------------------------------------
+        # Download controls
+        # -----------------------------------------------------
+
+        gr.Markdown("### Download Papers")
+
+        with gr.Row():
+
+            download_1 = gr.DownloadButton(
+                "Download Paper 1",
+                visible=False
+            )
+
+            download_2 = gr.DownloadButton(
+                "Download Paper 2",
+                visible=False
+            )
+
+            download_3 = gr.DownloadButton(
+                "Download Paper 3",
+                visible=False
+            )
+
+        # -----------------------------------------------------
+        # Research button event
+        # -----------------------------------------------------
+
+        research_button.click(
+            fn=agent_chat,
+            inputs=[
+                topic,
+                num_papers,
+                read_paper,
+                summarize_methodology,
+                generate_bibtex,
+                additional_instructions
+            ],
+            outputs=[
+                output,
+                download_1,
+                download_2,
+                download_3
+            ]
+        )
+
+        # -----------------------------------------------------
+        # Download button events
+        # -----------------------------------------------------
+
+        download_1.click(
+            fn=lambda: download_paper(0),
+            outputs=download_1
+        )
+
+        download_2.click(
+            fn=lambda: download_paper(1),
+            outputs=download_2
+        )
+
+        download_3.click(
+            fn=lambda: download_paper(2),
+            outputs=download_3
+        )
+
+
     # -----------------------------------------------------
-    # Research button event
+    # Deep Research tab (extension)
     # -----------------------------------------------------
 
-    research_button.click(
-        fn=agent_chat,
-        inputs=[
-            topic,
-            num_papers,
-            read_paper,
-            summarize_methodology,
-            generate_bibtex,
-            additional_instructions
-        ],
-        outputs=[
-            output,
-            download_1,
-            download_2,
-            download_3
-        ]
-    )
+    with gr.Tab("Deep Research — Extended Multi-Source Research"):
 
-    # -----------------------------------------------------
-    # Download button events
-    # -----------------------------------------------------
+        gr.Markdown(
+            "Combine **arXiv academic papers** with **web search results** "
+            "(via SerpAPI) into a single synthesized research report."
+        )
 
-    download_1.click(
-        fn=lambda: download_paper(0),
-        outputs=download_1
-    )
+        dr_question = gr.Textbox(
+            label="Research Question",
+            placeholder=(
+                "E.g., How are AI agents being used in scientific research?"
+            )
+        )
 
-    download_2.click(
-        fn=lambda: download_paper(1),
-        outputs=download_2
-    )
+        with gr.Row():
 
-    download_3.click(
-        fn=lambda: download_paper(2),
-        outputs=download_3
-    )
+            dr_num_papers = gr.Slider(
+                minimum=1,
+                maximum=3,
+                value=2,
+                step=1,
+                label="Number of Academic Papers"
+            )
+
+            dr_num_web = gr.Slider(
+                minimum=1,
+                maximum=5,
+                value=3,
+                step=1,
+                label="Number of Web Results"
+            )
+
+        dr_depth = gr.Radio(
+            choices=["Quick", "Detailed"],
+            value="Quick",
+            label="Research Depth"
+        )
+
+        dr_instructions = gr.Textbox(
+            label="Additional Instructions (Optional)",
+            placeholder=(
+                "E.g., Focus on practical applications."
+            ),
+            lines=2
+        )
+
+        dr_button = gr.Button(
+            "Deep Research"
+        )
+
+        dr_output = gr.Markdown(
+            label="Deep Research Report"
+        )
+
+        dr_button.click(
+            fn=deep_research,
+            inputs=[
+                dr_question,
+                dr_num_papers,
+                dr_num_web,
+                dr_depth,
+                dr_instructions
+            ],
+            outputs=dr_output
+        )
 
 
 # ---------------------------------------------------------
